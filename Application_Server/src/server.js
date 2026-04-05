@@ -1,6 +1,10 @@
 import http from "http";
+import dotenv from "dotenv";
+import nodemailer from "nodemailer";
 import { createClient } from "redis";
 import { initDb, pool } from "../../Admin_Dashboard_server/backend/src/db.js";
+
+dotenv.config();
 
 const port = Number(process.env.PORT || 4100);
 const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
@@ -11,8 +15,22 @@ const UNASSIGNED_CAMERAS_KEY = "anpr:unassigned_cameras";
 const META_KEY = "anpr:assignment_meta";
 const CACHE_UPDATE_CHANNEL = "anpr:assignments:updated";
 const LONG_POLL_TIMEOUT_MS = Number(process.env.LONG_POLL_TIMEOUT_MS || 25000);
+const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "71762205104@cit.edu.in";
+const EMAIL_USER = process.env.EMAIL_USER || "";
+const EMAIL_PASS = process.env.EMAIL_PASS || "";
+const DETECTION_DEDUP_MINUTES = Number(process.env.DETECTION_DEDUP_MINUTES || 15);
 
 const redis = createClient({ url: redisUrl });
+const mailTransport =
+  EMAIL_USER && EMAIL_PASS
+    ? nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: EMAIL_USER,
+          pass: EMAIL_PASS
+        }
+      })
+    : null;
 
 let lastSyncSummary = null;
 let syncInFlight = null;
@@ -66,6 +84,36 @@ function notifyAssignmentWaiters(serverIdentifier, payload) {
   }
 
   waiters.clear();
+}
+
+async function parseJsonBody(req) {
+  const body = await new Promise((resolve, reject) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+    });
+    req.on("end", () => resolve(raw));
+    req.on("error", reject);
+  });
+
+  return body ? JSON.parse(body) : {};
+}
+
+async function sendMail({ subject, text, html }) {
+  if (!mailTransport) {
+    console.warn("[mail] EMAIL_USER / EMAIL_PASS not configured, skipping email send");
+    return { skipped: true };
+  }
+
+  await mailTransport.sendMail({
+    from: EMAIL_USER,
+    to: NOTIFICATION_EMAIL,
+    subject,
+    text,
+    html
+  });
+
+  return { skipped: false };
 }
 
 async function fetchNumberPlateServers() {
@@ -134,6 +182,49 @@ async function fetchCurrentAssignments() {
       .map((value) => JSON.parse(value))
       .map((assignment) => [assignment.camera_id, assignment])
   );
+}
+
+async function fetchReviewFines() {
+  const result = await pool.query(
+    `SELECT
+       rf.id,
+       rf.plate,
+       rf.review_date,
+       rf.status,
+       rf.review_note,
+       rf.created_at,
+       rf.reviewed_at,
+       rf.email_sent_at,
+       COALESCE(
+         json_agg(
+           json_build_object(
+             'id', pd.id,
+             'camera_id', pd.camera_id,
+             'detected_at', pd.detected_at,
+             'image_base64', pd.image_base64,
+             'mime_type', pd.mime_type
+           )
+           ORDER BY pd.detected_at ASC
+         ) FILTER (WHERE pd.id IS NOT NULL),
+         '[]'::json
+       ) AS detections
+     FROM review_fines rf
+     LEFT JOIN plate_detections pd
+       ON pd.plate = rf.plate
+      AND pd.detected_at::DATE = rf.review_date
+     GROUP BY
+       rf.id,
+       rf.plate,
+       rf.review_date,
+       rf.status,
+       rf.review_note,
+       rf.created_at,
+       rf.reviewed_at,
+       rf.email_sent_at
+     ORDER BY rf.created_at DESC`
+  );
+
+  return result.rows;
 }
 
 function assignCamerasToServers(cameras, servers, currentAssignments) {
@@ -354,18 +445,110 @@ async function createListenerConnection() {
 
 async function handleRequest(req, res) {
   const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type"
+  };
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, corsHeaders);
+    res.end();
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/detections") {
+    const payload = await parseJsonBody(req);
+    const plate = String(payload.plate || "").trim().toUpperCase();
+    const cameraId = Number(payload.camera_id);
+    const imageBase64 = String(payload.imageBase64 || "").trim();
+    const mimeType = String(payload.mimeType || "image/jpeg").trim();
+
+    if (!plate || !Number.isInteger(cameraId) || !imageBase64) {
+      res.writeHead(400, { "Content-Type": "application/json", ...corsHeaders });
+      res.end(JSON.stringify({ error: "plate, camera_id, and imageBase64 are required" }));
+      return;
+    }
+
+    const duplicateCheck = await pool.query(
+      `SELECT id, camera_id, detected_at
+       FROM plate_detections
+       WHERE plate = $1
+         AND detected_at >= NOW() - ($2::text || ' minutes')::interval
+       ORDER BY detected_at DESC
+       LIMIT 1`,
+      [plate, DETECTION_DEDUP_MINUTES]
+    );
+
+    if (duplicateCheck.rowCount > 0) {
+      res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          ignored: true,
+          reason: "seen_within_last_15_minutes",
+          last_detection_at: duplicateCheck.rows[0].detected_at
+        })
+      );
+      return;
+    }
+
+    const insert = await pool.query(
+      `INSERT INTO plate_detections (plate, camera_id, image_base64, mime_type)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, detected_at`,
+      [plate, cameraId, imageBase64, mimeType]
+    );
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::INTEGER AS count
+       FROM plate_detections
+       WHERE plate = $1
+         AND detected_at::DATE = CURRENT_DATE`,
+      [plate]
+    );
+
+    const countToday = countResult.rows[0].count;
+    let emailSent = false;
+    let reviewFineCreated = false;
+
+    if (countToday === 2) {
+      await sendMail({
+        subject: `Vehicle ${plate} seen twice today`,
+        text: `Vehicle ${plate} was detected twice today in the ANPR system.`,
+        html: `<p>Vehicle <strong>${plate}</strong> was detected twice today in the ANPR system.</p>`
+      });
+      emailSent = true;
+    }
+
+    if (countToday >= 3) {
+      await pool.query(
+        `INSERT INTO review_fines (plate, review_date, latest_detection_id, status)
+         VALUES ($1, CURRENT_DATE, $2, 'pending')
+         ON CONFLICT (plate, review_date)
+         DO UPDATE SET latest_detection_id = EXCLUDED.latest_detection_id
+         WHERE review_fines.status = 'pending'`,
+        [plate, insert.rows[0].id]
+      );
+      reviewFineCreated = true;
+    }
+
+    res.writeHead(201, { "Content-Type": "application/json", ...corsHeaders });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        ignored: false,
+        detection_id: insert.rows[0].id,
+        count_today: countToday,
+        email_sent: emailSent,
+        review_fine_created: reviewFineCreated
+      })
+    );
+    return;
+  }
 
   if (req.method === "POST" && requestUrl.pathname === "/api/servers/register") {
-    const body = await new Promise((resolve, reject) => {
-      let raw = "";
-      req.on("data", (chunk) => {
-        raw += chunk;
-      });
-      req.on("end", () => resolve(raw));
-      req.on("error", reject);
-    });
-
-    const payload = body ? JSON.parse(body) : {};
+    const payload = await parseJsonBody(req);
     const serverIdentifier = String(payload.server_identifier || "").trim();
     const latitude = Number(payload.latitude);
     const longitude = Number(payload.longitude);
@@ -378,7 +561,7 @@ async function handleRequest(req, res) {
       !Number.isInteger(connectionLimit) ||
       connectionLimit < 1
     ) {
-      res.writeHead(400, { "Content-Type": "application/json" });
+      res.writeHead(400, { "Content-Type": "application/json", ...corsHeaders });
       res.end(JSON.stringify({ error: "Invalid server registration payload" }));
       return;
     }
@@ -399,7 +582,7 @@ async function handleRequest(req, res) {
 
     const summary = await syncAssignments("server-register");
 
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(
       JSON.stringify({
         server: result.rows[0],
@@ -411,7 +594,7 @@ async function handleRequest(req, res) {
 
   if (req.method === "GET" && requestUrl.pathname === "/api/health") {
     const meta = await redis.get(META_KEY);
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(
       JSON.stringify({
         ok: true,
@@ -424,7 +607,7 @@ async function handleRequest(req, res) {
 
   if (req.method === "POST" && requestUrl.pathname === "/api/sync") {
     const summary = await syncAssignments("api-sync");
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(JSON.stringify(summary));
     return;
   }
@@ -437,7 +620,7 @@ async function handleRequest(req, res) {
       redis.hGetAll(CAMERA_ASSIGNMENTS_KEY)
     ]);
 
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(
       JSON.stringify({
         summary: summary ? JSON.parse(summary) : null,
@@ -446,6 +629,66 @@ async function handleRequest(req, res) {
         assignments: Object.values(cameraAssignments).map((value) => JSON.parse(value))
       })
     );
+    return;
+  }
+
+  if (req.method === "GET" && requestUrl.pathname === "/api/review-fines") {
+    const reviewFines = await fetchReviewFines();
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
+    res.end(JSON.stringify(reviewFines));
+    return;
+  }
+
+  if (
+    req.method === "POST" &&
+    /^\/api\/review-fines\/\d+\/(approve|reject)$/.test(requestUrl.pathname)
+  ) {
+    const [, , , reviewFineId, action] = requestUrl.pathname.split("/");
+    const reviewFine = await pool.query(
+      `SELECT rf.id, rf.plate
+       FROM review_fines rf
+       WHERE rf.id = $1`,
+      [Number(reviewFineId)]
+    );
+
+    if (reviewFine.rowCount === 0) {
+      res.writeHead(404, { "Content-Type": "application/json", ...corsHeaders });
+      res.end(JSON.stringify({ error: "Review fine not found" }));
+      return;
+    }
+
+    const notePayload = await parseJsonBody(req);
+    const reviewNote = String(notePayload.note || "").trim();
+
+    if (action === "approve") {
+      await sendMail({
+        subject: `Fine initiated for vehicle ${reviewFine.rows[0].plate}`,
+        text: `A fine review was approved for vehicle ${reviewFine.rows[0].plate}.`,
+        html: `<p>A fine review was approved for vehicle <strong>${reviewFine.rows[0].plate}</strong>.</p>`
+      });
+
+      await pool.query(
+        `UPDATE review_fines
+         SET status = 'approved',
+             review_note = $2,
+             reviewed_at = NOW(),
+             email_sent_at = NOW()
+         WHERE id = $1`,
+        [Number(reviewFineId), reviewNote || "Fine initiated by admin"]
+      );
+    } else {
+      await pool.query(
+        `UPDATE review_fines
+         SET status = 'rejected',
+             review_note = $2,
+             reviewed_at = NOW()
+         WHERE id = $1`,
+        [Number(reviewFineId), reviewNote || "Rejected by admin"]
+      );
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
 
@@ -496,7 +739,7 @@ async function handleRequest(req, res) {
         waiters.add(resolveFromWaiter);
       });
 
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
       res.end(
         JSON.stringify(
           payload || {
@@ -512,7 +755,7 @@ async function handleRequest(req, res) {
 
     const assignments = await redis.get(getServerAssignmentsKey(serverIdentifier));
 
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
     res.end(
       JSON.stringify({
         server_identifier: serverIdentifier,
@@ -522,7 +765,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  res.writeHead(404, { "Content-Type": "application/json" });
+  res.writeHead(404, { "Content-Type": "application/json", ...corsHeaders });
   res.end(JSON.stringify({ error: "Not found" }));
 }
 
@@ -541,7 +784,12 @@ async function start() {
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
       console.error("[application-server] request failed:", error);
-      res.writeHead(500, { "Content-Type": "application/json" });
+      res.writeHead(500, {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      });
       res.end(JSON.stringify({ error: error.message }));
     });
   });

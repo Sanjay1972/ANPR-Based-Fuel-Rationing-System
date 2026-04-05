@@ -252,6 +252,155 @@ h3 {
   gap: 20px;
 }
 
+.nav-panel {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 20px;
+}
+
+.nav-chip {
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 18px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.nav-chip-active {
+  background: rgba(255, 179, 71, 0.16);
+  color: #ffe7c9;
+}
+
+.review-panel {
+  padding: 22px;
+}
+
+.review-panel-header {
+  margin-bottom: 18px;
+}
+
+.review-list {
+  display: grid;
+  gap: 18px;
+}
+
+.review-wide-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+  gap: 18px;
+  padding: 18px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.review-image-shell {
+  overflow: hidden;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.2);
+  min-height: 100%;
+}
+
+.review-image {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+}
+
+.review-card-body {
+  display: grid;
+  gap: 8px;
+}
+
+.review-card-body-wide {
+  align-content: space-between;
+}
+
+.review-media-column {
+  display: grid;
+  gap: 14px;
+}
+
+.review-carousel {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 56px;
+  gap: 12px;
+  align-items: center;
+}
+
+.carousel-arrow {
+  height: 56px;
+  width: 56px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1.3rem;
+}
+
+.carousel-arrow:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.review-image-shell-wide {
+  border-radius: 22px;
+}
+
+.review-image-wide {
+  aspect-ratio: 16 / 9;
+}
+
+.review-image-empty {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.review-frame-meta,
+.review-detail-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.review-detail-grid {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.review-detail-card,
+.review-timestamp-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.review-meta-label {
+  color: #d7b89d;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.review-meta-value {
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.review-frame-counter {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.review-status-pill {
+  color: #ffe0ba;
+}
+
 .bunk-card {
   padding: 22px;
 }
@@ -482,5 +631,20 @@ h3 {
 
   .coordinate-picker-row {
     grid-template-columns: 1fr;
+  }
+
+  .nav-panel,
+  .review-carousel,
+  .review-wide-card {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-panel {
+    display: grid;
+  }
+
+  .carousel-arrow {
+    width: 100%;
+    border-radius: 14px;
   }
 }

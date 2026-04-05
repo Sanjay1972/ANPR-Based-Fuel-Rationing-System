@@ -1,7 +1,8 @@
-import os
-import time
-import threading
 import json
+import os
+import threading
+import time
+from base64 import b64encode
 from urllib import error, parse, request
 
 import cv2
@@ -13,7 +14,6 @@ from config import (
     ASSIGNMENT_LONG_POLL_TIMEOUT,
     ASSIGNMENT_POLL_RETRY_INITIAL_DELAY,
     ASSIGNMENT_POLL_RETRY_MAX_DELAY,
-    CACHE_TTL,
     INDIAN_PLATE_REGEX,
     MAX_MISSED_FRAMES,
     NUMBER_PLATE_SERVER_CONNECTION_LIMIT,
@@ -27,9 +27,6 @@ from config import (
 from db.db import get_cameras
 from processor.processor import PlateProcessor
 from utils.utils import normalize_video_path
-
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def similarity(a, b):
@@ -72,7 +69,7 @@ def add_candidate(track, plate, conf, frame):
         track["best_candidate"] = candidate
 
 
-def finalize_track(track, cache, cam_id):
+def finalize_track(track, cam_id):
     valid_candidates = [
         candidate
         for candidate in track["candidates"]
@@ -91,16 +88,11 @@ def finalize_track(track, cache, cam_id):
     best = max(valid_candidates, key=lambda candidate: candidate["confidence"])
     plate = best["plate"]
 
-    if plate in cache:
-        print(f"[CAM {cam_id}] Plate {plate} already saved recently")
-        return None
-
-    cache[plate] = time.time()
     print(f"[CAM {cam_id}] Finalized {plate} with confidence {best['confidence']:.3f}")
     return best
 
 
-def save_output(plate, frame, cam_id, roi=None):
+def build_output_frame(frame, roi=None):
     output_frame = frame.copy()
     if roi:
         h, w = output_frame.shape[:2]
@@ -126,24 +118,63 @@ def save_output(plate, frame, cam_id, roi=None):
             2,
         )
 
-    filename = os.path.join(OUTPUT_DIR, f"{plate}_{int(time.time())}_roi.jpg")
-    cv2.imwrite(filename, output_frame)
-    print(f"[CAM {cam_id}] Saved {filename}")
+    return output_frame
 
 
-def close_track(tracks, cam_id, cache, roi=None):
+def send_detection_to_application_server(plate, frame, cam_id, roi=None):
+    output_frame = build_output_frame(frame, roi)
+    success, encoded = cv2.imencode(".jpg", output_frame)
+
+    if not success:
+        raise RuntimeError("Failed to encode detection frame as JPEG")
+
+    payload = json.dumps(
+        {
+            "plate": plate,
+            "camera_id": cam_id,
+            "mimeType": "image/jpeg",
+            "imageBase64": b64encode(encoded.tobytes()).decode("utf-8"),
+        }
+    ).encode("utf-8")
+
+    req = request.Request(
+        f"{APPLICATION_SERVER_URL}/api/detections",
+        data=payload,
+        headers={"Content-Type": "application/json", "Connection": "close"},
+        method="POST",
+    )
+
+    with request.urlopen(req, timeout=20) as response:
+        result = json.loads(response.read().decode("utf-8"))
+
+    if result.get("ignored"):
+        print(
+            f"[CAM {cam_id}] Detection for {plate} ignored by application server: "
+            f"{result.get('reason')} (last_detection_at={result.get('last_detection_at')})"
+        )
+        return
+
+    print(
+        f"[CAM {cam_id}] Detection sent for {plate}. "
+        f"count_today={result.get('count_today')}, "
+        f"email_sent={result.get('email_sent')}, "
+        f"review_fine_created={result.get('review_fine_created')}"
+    )
+
+
+def close_track(tracks, cam_id, roi=None):
     track = tracks.get(cam_id)
     if track is None:
         return
 
-    best = finalize_track(track, cache, cam_id)
+    best = finalize_track(track, cam_id)
     if best:
-        save_output(best["plate"], best["frame"], cam_id, roi)
+        send_detection_to_application_server(best["plate"], best["frame"], cam_id, roi)
 
     del tracks[cam_id]
 
 
-def process_camera(cam, processor, process_lock, cache, cache_lock, stop_event):
+def process_camera(cam, processor, process_lock, stop_event):
     cam_id = cam["camera_id"]
     path = normalize_video_path(cam["rtsp_url"])
     cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
@@ -186,8 +217,7 @@ def process_camera(cam, processor, process_lock, cache, cache_lock, stop_event):
 
                     if track["missed_frames"] >= MAX_MISSED_FRAMES:
                         print(f"[CAM {cam_id}] Track timed out, saving and resetting")
-                        with cache_lock:
-                            close_track({cam_id: track}, cam_id, cache, cam["roi"])
+                        close_track({cam_id: track}, cam_id, cam["roi"])
                         track = None
 
                 continue
@@ -205,14 +235,12 @@ def process_camera(cam, processor, process_lock, cache, cache_lock, stop_event):
                 add_candidate(track, plate, conf, frame)
             else:
                 print(f"[CAM {cam_id}] Track break, saving current track and starting a new one")
-                with cache_lock:
-                    close_track({cam_id: track}, cam_id, cache, cam["roi"])
+                close_track({cam_id: track}, cam_id, cam["roi"])
                 track = create_track(plate, conf, frame, now)
 
     finally:
         if track is not None:
-            with cache_lock:
-                close_track({cam_id: track}, cam_id, cache, cam["roi"])
+            close_track({cam_id: track}, cam_id, cam["roi"])
         cap.release()
 
 
@@ -246,8 +274,6 @@ class CameraManager:
     def __init__(self):
         self.processor = PlateProcessor()
         self.process_lock = threading.Lock()
-        self.cache = {}
-        self.cache_lock = threading.Lock()
         self.workers = {}
         self.lock = threading.Lock()
 
@@ -287,8 +313,6 @@ class CameraManager:
                 camera,
                 self.processor,
                 self.process_lock,
-                self.cache,
-                self.cache_lock,
                 stop_event,
             ),
             daemon=True,
@@ -439,11 +463,6 @@ def main():
 
     try:
         while True:
-            now = time.time()
-            with manager.cache_lock:
-                for plate_key in list(manager.cache.keys()):
-                    if now - manager.cache[plate_key] > CACHE_TTL:
-                        del manager.cache[plate_key]
             manager.prune_finished_workers()
             time.sleep(1)
     except KeyboardInterrupt:

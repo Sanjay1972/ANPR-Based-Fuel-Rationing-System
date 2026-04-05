@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { createBunk, createCamera, fetchBunks, fetchCameras, saveRoi } from "./api";
+import {
+  approveReviewFine,
+  createBunk,
+  createCamera,
+  fetchBunks,
+  fetchCameras,
+  fetchReviewFines,
+  rejectReviewFine,
+  saveRoi
+} from "./api";
 import BunkCard from "./components/BunkCard.jsx";
 import MapPickerModal from "./components/MapPickerModal.jsx";
 import RoiModal from "./components/RoiModal.jsx";
@@ -20,6 +29,10 @@ export default function App() {
   const [activeCamera, setActiveCamera] = useState(null);
   const [busyBunkIds, setBusyBunkIds] = useState([]);
   const [isMapPickerOpen, setIsMapPickerOpen] = useState(false);
+  const [reviewFines, setReviewFines] = useState([]);
+  const [activeView, setActiveView] = useState("operations");
+  const [reviewFrameIndexes, setReviewFrameIndexes] = useState({});
+  const [refreshingReviewFines, setRefreshingReviewFines] = useState(false);
 
   useEffect(() => {
     loadDashboard();
@@ -36,6 +49,8 @@ export default function App() {
         }))
       );
       setBunks(bunkWithCameras);
+      const reviewFineList = await fetchReviewFines();
+      setReviewFines(reviewFineList.filter((item) => item.status === "pending"));
     } catch (error) {
       setBanner({ type: "error", text: error.message });
     } finally {
@@ -91,6 +106,55 @@ export default function App() {
     );
 
     setBanner({ type: "success", text: `ROI saved for camera ${cameraId}.` });
+    loadDashboard();
+  }
+
+  async function handleReviewAction(reviewFineId, action) {
+    try {
+      if (action === "approve") {
+        await approveReviewFine(reviewFineId);
+        setBanner({ type: "success", text: `Fine initiated for review #${reviewFineId}.` });
+      } else {
+        await rejectReviewFine(reviewFineId);
+        setBanner({ type: "success", text: `Review #${reviewFineId} rejected.` });
+      }
+
+      setReviewFines((current) => current.filter((item) => item.id !== reviewFineId));
+    } catch (error) {
+      setBanner({ type: "error", text: error.message });
+    }
+  }
+
+  async function handleRefreshReviewFines() {
+    try {
+      setRefreshingReviewFines(true);
+      const reviewFineList = await fetchReviewFines();
+      setReviewFines(reviewFineList.filter((item) => item.status === "pending"));
+      setBanner({ type: "success", text: "Review fines refreshed." });
+    } catch (error) {
+      setBanner({ type: "error", text: error.message });
+    } finally {
+      setRefreshingReviewFines(false);
+    }
+  }
+
+  function formatDetectionTime(value) {
+    if (!value) {
+      return "Unknown time";
+    }
+
+    return new Date(value).toLocaleString("en-IN", {
+      dateStyle: "medium",
+      timeStyle: "medium"
+    });
+  }
+
+  function shiftReviewFrame(reviewFineId, totalFrames, direction) {
+    setReviewFrameIndexes((current) => {
+      const currentIndex = current[reviewFineId] || 0;
+      const nextIndex = (currentIndex + direction + totalFrames) % totalFrames;
+      return { ...current, [reviewFineId]: nextIndex };
+    });
   }
 
   return (
@@ -111,7 +175,24 @@ export default function App() {
           </button>
         </section>
 
-        {isAddingBunk && (
+        <section className="panel nav-panel">
+          <button
+            className={`nav-chip ${activeView === "operations" ? "nav-chip-active" : ""}`}
+            type="button"
+            onClick={() => setActiveView("operations")}
+          >
+            Operations
+          </button>
+          <button
+            className={`nav-chip ${activeView === "review" ? "nav-chip-active" : ""}`}
+            type="button"
+            onClick={() => setActiveView("review")}
+          >
+            Review Fines
+          </button>
+        </section>
+
+        {activeView === "operations" && isAddingBunk && (
           <form className="panel form-panel" onSubmit={handleAddBunk}>
             <div className="field-group">
               <label htmlFor="bunk-name">Bunk Name</label>
@@ -195,23 +276,146 @@ export default function App() {
           </div>
         )}
 
-        {loading ? (
-          <section className="panel loading-panel">Loading bunks and cameras...</section>
-        ) : bunks.length === 0 ? (
-          <section className="panel empty-state">
-            No bunks yet. Use <strong>+ Add Bunk</strong> to create your first bunk card.
-          </section>
+        {activeView === "operations" ? (
+          loading ? (
+            <section className="panel loading-panel">Loading bunks and cameras...</section>
+          ) : (
+            bunks.length === 0 ? (
+              <section className="panel empty-state">
+                No bunks yet. Use <strong>+ Add Bunk</strong> to create your first bunk card.
+              </section>
+            ) : (
+              <section className="bunk-grid">
+                {bunks.map((bunk) => (
+                  <BunkCard
+                    key={bunk.id}
+                    bunk={bunk}
+                    onAddCamera={handleAddCamera}
+                    onDrawRoi={setActiveCamera}
+                    busy={busyBunkIds.includes(bunk.id)}
+                  />
+                ))}
+              </section>
+            )
+          )
         ) : (
-          <section className="bunk-grid">
-            {bunks.map((bunk) => (
-              <BunkCard
-                key={bunk.id}
-                bunk={bunk}
-                onAddCamera={handleAddCamera}
-                onDrawRoi={setActiveCamera}
-                busy={busyBunkIds.includes(bunk.id)}
-              />
-            ))}
+          <section className="panel review-panel">
+            <div className="review-panel-header">
+              <div>
+                <p className="eyebrow">Enforcement</p>
+                <h2>Review Fines</h2>
+                <p className="muted">
+                  Plates detected three or more times in a day appear here for admin review.
+                </p>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={handleRefreshReviewFines}
+                disabled={refreshingReviewFines}
+              >
+                {refreshingReviewFines ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
+
+            {reviewFines.length === 0 ? (
+              <div className="camera-empty">No pending review fines right now.</div>
+            ) : (
+              <div className="review-list">
+                {reviewFines.map((item) => {
+                  const detections = item.detections || [];
+                  const currentFrameIndex = reviewFrameIndexes[item.id] || 0;
+                  const currentDetection = detections[currentFrameIndex];
+
+                  return (
+                    <article key={item.id} className="review-wide-card">
+                      <div className="review-media-column">
+                        <div className="review-carousel">
+                          <button
+                            className="carousel-arrow"
+                            type="button"
+                            disabled={detections.length <= 1}
+                            onClick={() => shiftReviewFrame(item.id, detections.length, -1)}
+                          >
+                            ←
+                          </button>
+                          <div className="review-image-shell review-image-shell-wide">
+                            {currentDetection ? (
+                              <img
+                                className="review-image review-image-wide"
+                                src={`data:${currentDetection.mime_type};base64,${currentDetection.image_base64}`}
+                                alt={`Plate ${item.plate} detection ${currentDetection.id}`}
+                              />
+                            ) : (
+                              <div className="review-image-empty">No frame available.</div>
+                            )}
+                          </div>
+                          <button
+                            className="carousel-arrow"
+                            type="button"
+                            disabled={detections.length <= 1}
+                            onClick={() => shiftReviewFrame(item.id, detections.length, 1)}
+                          >
+                            →
+                          </button>
+                        </div>
+                        <div className="review-frame-meta">
+                          <div className="review-frame-counter">
+                            Frame {detections.length === 0 ? 0 : currentFrameIndex + 1} of{" "}
+                            {detections.length}
+                          </div>
+                          {currentDetection && (
+                            <div className="review-timestamp-card">
+                              <span className="review-meta-label">Captured At</span>
+                              <span className="review-meta-value">
+                                {formatDetectionTime(currentDetection.detected_at)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="review-card-body review-card-body-wide">
+                        <p className="card-tag">Review #{item.id}</p>
+                        <h3>{item.plate}</h3>
+                        <div className="review-detail-grid">
+                          <div className="review-detail-card">
+                            <span className="review-meta-label">Review Date</span>
+                            <span className="review-meta-value">{item.review_date}</span>
+                          </div>
+                          <div className="review-detail-card">
+                            <span className="review-meta-label">Detections</span>
+                            <span className="review-meta-value">{detections.length} frames</span>
+                          </div>
+                          <div className="review-detail-card">
+                            <span className="review-meta-label">Status</span>
+                            <span className="review-meta-value review-status-pill">
+                              Pending Review
+                            </span>
+                          </div>
+                        </div>
+                        <div className="inline-actions">
+                          <button
+                            className="primary-button"
+                            type="button"
+                            onClick={() => handleReviewAction(item.id, "approve")}
+                          >
+                            Initiate Fine
+                          </button>
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => handleReviewAction(item.id, "reject")}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
       </main>

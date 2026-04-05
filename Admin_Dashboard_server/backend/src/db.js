@@ -77,6 +77,32 @@ export async function initDb() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS plate_detections (
+        id SERIAL PRIMARY KEY,
+        plate TEXT NOT NULL,
+        camera_id INTEGER REFERENCES cameras(id) ON DELETE SET NULL,
+        detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        image_base64 TEXT NOT NULL,
+        mime_type TEXT NOT NULL DEFAULT 'image/jpeg'
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS review_fines (
+        id SERIAL PRIMARY KEY,
+        plate TEXT NOT NULL,
+        review_date DATE NOT NULL,
+        latest_detection_id INTEGER REFERENCES plate_detections(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        review_note TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        reviewed_at TIMESTAMPTZ,
+        email_sent_at TIMESTAMPTZ,
+        UNIQUE (plate, review_date)
+      );
+    `);
+
+    await pool.query(`
       CREATE OR REPLACE FUNCTION notify_assignment_change()
       RETURNS trigger AS $$
       DECLARE

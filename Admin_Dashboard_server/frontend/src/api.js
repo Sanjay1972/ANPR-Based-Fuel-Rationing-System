@@ -1,8 +1,10 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:4000/api";
+const APPLICATION_API_BASE_URL =
+  import.meta.env.VITE_APPLICATION_SERVER_URL?.replace(/\/$/, "") || "http://localhost:4100/api";
 
-async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+async function requestWithBase(baseUrl, path, options = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
     headers: {
       "Content-Type": "application/json",
       ...(options.headers || {})
@@ -18,6 +20,14 @@ async function request(path, options = {}) {
   }
 
   return payload;
+}
+
+async function request(path, options = {}) {
+  return requestWithBase(API_BASE_URL, path, options);
+}
+
+async function requestApplication(path, options = {}) {
+  return requestWithBase(APPLICATION_API_BASE_URL, path, options);
 }
 
 export function fetchBunks() {
@@ -50,5 +60,23 @@ export function saveRoi(data) {
   return request("/roi", {
     method: "POST",
     body: JSON.stringify(data)
+  });
+}
+
+export function fetchReviewFines() {
+  return requestApplication("/review-fines");
+}
+
+export function approveReviewFine(id, note = "") {
+  return requestApplication(`/review-fines/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ note })
+  });
+}
+
+export function rejectReviewFine(id, note = "") {
+  return requestApplication(`/review-fines/${id}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ note })
   });
 }

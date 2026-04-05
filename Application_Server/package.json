@@ -8,6 +8,8 @@
     "start": "node src/server.js"
   },
   "dependencies": {
+    "dotenv": "^16.4.7",
+    "nodemailer": "^6.9.15",
     "redis": "^4.7.0"
   }
 }
