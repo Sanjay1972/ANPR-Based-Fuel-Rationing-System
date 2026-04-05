@@ -509,9 +509,15 @@ async function handleRequest(req, res) {
 
     if (countToday === 2) {
       await sendMail({
-        subject: `Vehicle ${plate} seen twice today`,
-        text: `Vehicle ${plate} was detected twice today in the ANPR system.`,
-        html: `<p>Vehicle <strong>${plate}</strong> was detected twice today in the ANPR system.</p>`
+        subject: `Repeat Vehicle Alert: ${plate}`,
+        text:
+          `Vehicle ${plate} has been detected more than once today across the monitored petrol bunk network.\n\n` +
+          `This is an automated alert for review under the fuel rationing policy.\n\n` +
+          `System: ANPR Fuel Rationing System`,
+        html:
+          `<p>Vehicle <strong>${plate}</strong> has been detected more than once today across the monitored petrol bunk network.</p>` +
+          `<p>This is an automated alert for review under the fuel rationing policy.</p>` +
+          `<p><strong>System:</strong> ANPR Fuel Rationing System</p>`
       });
       emailSent = true;
     }
@@ -667,9 +673,15 @@ async function handleRequest(req, res) {
 
     if (action === "approve") {
       await sendMail({
-        subject: `Fine initiated for vehicle ${reviewFine.rows[0].plate}`,
-        text: `A fine review was approved for vehicle ${reviewFine.rows[0].plate}.`,
-        html: `<p>A fine review was approved for vehicle <strong>${reviewFine.rows[0].plate}</strong>.</p>`
+        subject: `Fine Review Approved: ${reviewFine.rows[0].plate}`,
+        text:
+          `A fine review has been approved for vehicle ${reviewFine.rows[0].plate} after repeated detections in a single day.\n\n` +
+          `Please proceed with the required follow-up action.\n\n` +
+          `System: ANPR Fuel Rationing System`,
+        html:
+          `<p>A fine review has been approved for vehicle <strong>${reviewFine.rows[0].plate}</strong> after repeated detections in a single day.</p>` +
+          `<p>Please proceed with the required follow-up action.</p>` +
+          `<p><strong>System:</strong> ANPR Fuel Rationing System</p>`
       });
 
       await pool.query(
