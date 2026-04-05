@@ -19,6 +19,7 @@ const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL || "71762205104@cit.ed
 const EMAIL_USER = process.env.EMAIL_USER || "";
 const EMAIL_PASS = process.env.EMAIL_PASS || "";
 const DETECTION_DEDUP_MINUTES = Number(process.env.DETECTION_DEDUP_MINUTES || 15);
+const RECENT_PLATE_KEY_PREFIX = "anpr:recent_plate:";
 
 const redis = createClient({ url: redisUrl });
 const mailTransport =
@@ -470,24 +471,18 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const duplicateCheck = await pool.query(
-      `SELECT id, camera_id, detected_at
-       FROM plate_detections
-       WHERE plate = $1
-         AND detected_at >= NOW() - ($2::text || ' minutes')::interval
-       ORDER BY detected_at DESC
-       LIMIT 1`,
-      [plate, DETECTION_DEDUP_MINUTES]
-    );
+    const recentPlateKey = `${RECENT_PLATE_KEY_PREFIX}${plate}`;
+    const recentDetection = await redis.get(recentPlateKey);
 
-    if (duplicateCheck.rowCount > 0) {
+    if (recentDetection) {
+      const cachedDetection = JSON.parse(recentDetection);
       res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
       res.end(
         JSON.stringify({
           ok: true,
           ignored: true,
           reason: "seen_within_last_15_minutes",
-          last_detection_at: duplicateCheck.rows[0].detected_at
+          last_detection_at: cachedDetection.detected_at
         })
       );
       return;
@@ -532,6 +527,16 @@ async function handleRequest(req, res) {
       );
       reviewFineCreated = true;
     }
+
+    await redis.setEx(
+      recentPlateKey,
+      DETECTION_DEDUP_MINUTES * 60,
+      JSON.stringify({
+        plate,
+        camera_id: cameraId,
+        detected_at: insert.rows[0].detected_at
+      })
+    );
 
     res.writeHead(201, { "Content-Type": "application/json", ...corsHeaders });
     res.end(
