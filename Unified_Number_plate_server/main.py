@@ -1,14 +1,24 @@
 import os
 import time
 import threading
+import json
+from urllib import error, parse, request
 
 import cv2
 import Levenshtein
 
 from config import (
+    ANPR_SERVER_ID,
+    APPLICATION_SERVER_URL,
+    ASSIGNMENT_LONG_POLL_TIMEOUT,
+    ASSIGNMENT_POLL_RETRY_INITIAL_DELAY,
+    ASSIGNMENT_POLL_RETRY_MAX_DELAY,
     CACHE_TTL,
     INDIAN_PLATE_REGEX,
     MAX_MISSED_FRAMES,
+    NUMBER_PLATE_SERVER_CONNECTION_LIMIT,
+    NUMBER_PLATE_SERVER_LATITUDE,
+    NUMBER_PLATE_SERVER_LONGITUDE,
     OUTPUT_DIR,
     PROCESS_INTERVAL,
     SAVE_CONFIDENCE_THRESHOLD,
@@ -133,7 +143,7 @@ def close_track(tracks, cam_id, cache, roi=None):
     del tracks[cam_id]
 
 
-def process_camera(cam, processor, process_lock, cache, cache_lock):
+def process_camera(cam, processor, process_lock, cache, cache_lock, stop_event):
     cam_id = cam["camera_id"]
     path = normalize_video_path(cam["rtsp_url"])
     cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
@@ -142,7 +152,7 @@ def process_camera(cam, processor, process_lock, cache, cache_lock):
     frame_count = 0
 
     try:
-        while True:
+        while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.1)
@@ -200,37 +210,244 @@ def process_camera(cam, processor, process_lock, cache, cache_lock):
                 track = create_track(plate, conf, frame, now)
 
     finally:
+        if track is not None:
+            with cache_lock:
+                close_track({cam_id: track}, cam_id, cache, cam["roi"])
         cap.release()
 
 
-def main():
-    cameras = get_cameras()
+def roi_signature(roi):
+    return tuple(round(float(value), 6) for value in roi)
 
-    processor = PlateProcessor()
-    process_lock = threading.Lock()
-    cache = {}
-    cache_lock = threading.Lock()
 
-    threads = []
-    for cam in cameras:
+def camera_signature(cam):
+    return (cam["rtsp_url"], roi_signature(cam["roi"]))
+
+
+def assignment_to_camera(assignment):
+    roi = assignment.get("roi")
+
+    if not roi:
+        return None
+
+    return {
+        "camera_id": assignment["camera_id"],
+        "rtsp_url": assignment["video_path"],
+        "roi": (
+            float(roi["x1"]),
+            float(roi["y1"]),
+            float(roi["x2"]),
+            float(roi["y2"])
+        )
+    }
+
+
+class CameraManager:
+    def __init__(self):
+        self.processor = PlateProcessor()
+        self.process_lock = threading.Lock()
+        self.cache = {}
+        self.cache_lock = threading.Lock()
+        self.workers = {}
+        self.lock = threading.Lock()
+
+    def apply_assignments(self, assignments):
+        desired_cameras = {}
+
+        for assignment in assignments:
+            camera = assignment_to_camera(assignment)
+            if camera is None:
+                continue
+            desired_cameras[camera["camera_id"]] = camera
+
+        with self.lock:
+            current_ids = set(self.workers.keys())
+            desired_ids = set(desired_cameras.keys())
+
+            for cam_id in current_ids - desired_ids:
+                self._stop_camera(cam_id)
+
+            for cam_id, camera in desired_cameras.items():
+                worker = self.workers.get(cam_id)
+                signature = camera_signature(camera)
+
+                if worker and worker["signature"] == signature and worker["thread"].is_alive():
+                    continue
+
+                if worker:
+                    self._stop_camera(cam_id)
+
+                self._start_camera(camera, signature)
+
+    def _start_camera(self, camera, signature):
+        stop_event = threading.Event()
         thread = threading.Thread(
             target=process_camera,
-            args=(cam, processor, process_lock, cache, cache_lock),
+            args=(
+                camera,
+                self.processor,
+                self.process_lock,
+                self.cache,
+                self.cache_lock,
+                stop_event,
+            ),
             daemon=True,
+            name=f"camera-{camera['camera_id']}",
         )
+        self.workers[camera["camera_id"]] = {
+            "thread": thread,
+            "stop_event": stop_event,
+            "signature": signature,
+        }
         thread.start()
-        threads.append(thread)
+        print(f"[manager] Started camera {camera['camera_id']}")
+
+    def _stop_camera(self, cam_id):
+        worker = self.workers.pop(cam_id, None)
+        if worker is None:
+            return
+
+        worker["stop_event"].set()
+        print(f"[manager] Stopping camera {cam_id}")
+
+    def prune_finished_workers(self):
+        with self.lock:
+            finished_ids = [
+                cam_id
+                for cam_id, worker in self.workers.items()
+                if not worker["thread"].is_alive() and worker["stop_event"].is_set()
+            ]
+
+            for cam_id in finished_ids:
+                self.workers.pop(cam_id, None)
+
+    def stop_all(self):
+        with self.lock:
+            for cam_id in list(self.workers.keys()):
+                self._stop_camera(cam_id)
+
+
+def fetch_assignment_update(last_version):
+    params = {
+        "since": last_version or "0",
+        "timeout_ms": str(ASSIGNMENT_LONG_POLL_TIMEOUT * 1000),
+    }
+    url = (
+        f"{APPLICATION_SERVER_URL}/api/assignments/"
+        f"{parse.quote(ANPR_SERVER_ID)}/poll?{parse.urlencode(params)}"
+    )
+
+    req = request.Request(
+        url,
+        headers={
+            "Connection": "close",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+    with request.urlopen(req, timeout=ASSIGNMENT_LONG_POLL_TIMEOUT + 10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def register_number_plate_server():
+    payload = json.dumps(
+        {
+            "server_identifier": ANPR_SERVER_ID,
+            "latitude": NUMBER_PLATE_SERVER_LATITUDE,
+            "longitude": NUMBER_PLATE_SERVER_LONGITUDE,
+            "connection_limit": NUMBER_PLATE_SERVER_CONNECTION_LIMIT,
+        }
+    ).encode("utf-8")
+    req = request.Request(
+        f"{APPLICATION_SERVER_URL}/api/servers/register",
+        data=payload,
+        headers={"Content-Type": "application/json", "Connection": "close"},
+        method="POST",
+    )
+
+    with request.urlopen(req, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def assignment_poll_loop(manager):
+    version = None
+    retry_delay = ASSIGNMENT_POLL_RETRY_INITIAL_DELAY
+
+    while True:
+        try:
+            print(f"[poll] Waiting for updates since version {version or '0'}")
+            payload = fetch_assignment_update(version)
+            retry_delay = ASSIGNMENT_POLL_RETRY_INITIAL_DELAY
+            next_version = payload.get("version", version)
+            changed = bool(payload.get("changed"))
+            assignments = payload.get("assignments", [])
+
+            print(
+                f"[poll] Response received: changed={changed}, "
+                f"version={next_version}, assignments={len(assignments)}"
+            )
+            version = next_version
+
+            if changed:
+                manager.apply_assignments(assignments)
+                print(
+                    f"[poll] Received {len(assignments)} assignments for {ANPR_SERVER_ID} "
+                    f"at version {version}"
+                )
+        except error.URLError as exc:
+            print(f"[poll] Long poll failed: {exc}. Retrying in {retry_delay:.1f}s")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, ASSIGNMENT_POLL_RETRY_MAX_DELAY)
+        except Exception as exc:
+            print(f"[poll] Unexpected polling error: {exc}. Retrying in {retry_delay:.1f}s")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, ASSIGNMENT_POLL_RETRY_MAX_DELAY)
+
+
+def main():
+    try:
+        registration = register_number_plate_server()
+        print(
+            f"[register] Registered {ANPR_SERVER_ID} with "
+            f"limit={NUMBER_PLATE_SERVER_CONNECTION_LIMIT}, "
+            f"location=({NUMBER_PLATE_SERVER_LATITUDE}, {NUMBER_PLATE_SERVER_LONGITUDE})"
+        )
+        print(
+            f"[register] Assignment summary: "
+            f"{registration.get('assignment_summary', {})}"
+        )
+    except Exception as exc:
+        print(f"[register] Failed to register server: {exc}")
+
+    manager = CameraManager()
+    manager.apply_assignments([
+        {
+            "camera_id": camera["camera_id"],
+            "video_path": camera["rtsp_url"],
+            "roi": {
+                "x1": camera["roi"][0],
+                "y1": camera["roi"][1],
+                "x2": camera["roi"][2],
+                "y2": camera["roi"][3],
+            },
+        }
+        for camera in get_cameras()
+    ])
+
+    poll_thread = threading.Thread(target=assignment_poll_loop, args=(manager,), daemon=True)
+    poll_thread.start()
 
     try:
         while True:
             now = time.time()
-            with cache_lock:
-                for plate_key in list(cache.keys()):
-                    if now - cache[plate_key] > CACHE_TTL:
-                        del cache[plate_key]
+            with manager.cache_lock:
+                for plate_key in list(manager.cache.keys()):
+                    if now - manager.cache[plate_key] > CACHE_TTL:
+                        del manager.cache[plate_key]
+            manager.prune_finished_workers()
             time.sleep(1)
     except KeyboardInterrupt:
-        pass
+        manager.stop_all()
 
 
 if __name__ == "__main__":

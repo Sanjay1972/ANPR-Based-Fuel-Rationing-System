@@ -1,6 +1,10 @@
 import { useState } from "react";
 import CameraRow from "./CameraRow.jsx";
 
+function hasValidCoordinates(bunk) {
+  return Number.isFinite(Number(bunk.latitude)) && Number.isFinite(Number(bunk.longitude));
+}
+
 export default function BunkCard({ bunk, onAddCamera, onDrawRoi, busy }) {
   const [isAddingCamera, setIsAddingCamera] = useState(false);
   const [videoPath, setVideoPath] = useState("");
@@ -26,6 +30,11 @@ export default function BunkCard({ bunk, onAddCamera, onDrawRoi, busy }) {
           <p className="card-tag">Bunk #{bunk.id}</p>
           <h2>{bunk.name}</h2>
           <p className="muted">{bunk.address}</p>
+          {hasValidCoordinates(bunk) && (
+            <p className="coordinate-text">
+              {Number(bunk.latitude).toFixed(6)}, {Number(bunk.longitude).toFixed(6)}
+            </p>
+          )}
         </div>
         <button className="secondary-button" onClick={() => setIsAddingCamera((value) => !value)}>
           + Add Camera

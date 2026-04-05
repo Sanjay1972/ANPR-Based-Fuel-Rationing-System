@@ -17,23 +17,25 @@ function clamp(value, min, max) {
 export default function RoiModal({ camera, onClose, onSave }) {
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
+  const startPointRef = useRef(null);
+  const isDrawingRef = useRef(false);
+  const draftRectRef = useRef(null);
   const [frameData, setFrameData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [frameError, setFrameError] = useState("");
   const [actionError, setActionError] = useState("");
-  const [draftRect, setDraftRect] = useState(null);
   const [finalRect, setFinalRect] = useState(null);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [startPoint, setStartPoint] = useState(null);
 
   useEffect(() => {
     if (!camera) {
       setFrameData(null);
-      setDraftRect(null);
       setFinalRect(null);
       setFrameError("");
       setActionError("");
+      draftRectRef.current = null;
+      startPointRef.current = null;
+      isDrawingRef.current = false;
       return;
     }
 
@@ -101,7 +103,7 @@ export default function RoiModal({ camera, onClose, onSave }) {
 
   useEffect(() => {
     redrawCanvas();
-  }, [draftRect, finalRect]);
+  }, [finalRect]);
 
   function redrawCanvas() {
     const canvas = canvasRef.current;
@@ -115,7 +117,7 @@ export default function RoiModal({ camera, onClose, onSave }) {
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(image, 0, 0);
 
-    const rect = draftRect || finalRect;
+    const rect = draftRectRef.current || finalRect;
 
     if (!rect) {
       return;
@@ -156,36 +158,41 @@ export default function RoiModal({ camera, onClose, onSave }) {
       return;
     }
 
+    event.preventDefault();
     const point = getCanvasPoint(event);
-    setStartPoint(point);
-    setDraftRect({ x: point.x, y: point.y, width: 0, height: 0 });
-    setIsDrawing(true);
+    startPointRef.current = point;
+    draftRectRef.current = { x: point.x, y: point.y, width: 0, height: 0 };
+    isDrawingRef.current = true;
+    canvasRef.current?.setPointerCapture?.(event.pointerId);
+    redrawCanvas();
   }
 
   function handlePointerMove(event) {
-    if (!isDrawing || !startPoint) {
+    if (!isDrawingRef.current || !startPointRef.current) {
       return;
     }
 
     const point = getCanvasPoint(event);
-    setDraftRect({
-      x: startPoint.x,
-      y: startPoint.y,
-      width: point.x - startPoint.x,
-      height: point.y - startPoint.y
-    });
+    draftRectRef.current = {
+      x: startPointRef.current.x,
+      y: startPointRef.current.y,
+      width: point.x - startPointRef.current.x,
+      height: point.y - startPointRef.current.y
+    };
+    redrawCanvas();
   }
 
-  function handlePointerUp() {
-    if (!draftRect) {
+  function handlePointerUp(event) {
+    if (!draftRectRef.current) {
       return;
     }
 
-    const normalized = normalizeRect(draftRect);
+    const normalized = normalizeRect(draftRectRef.current);
     setFinalRect(normalized);
-    setDraftRect(null);
-    setIsDrawing(false);
-    setStartPoint(null);
+    draftRectRef.current = null;
+    isDrawingRef.current = false;
+    startPointRef.current = null;
+    canvasRef.current?.releasePointerCapture?.(event.pointerId);
   }
 
   async function handleSave() {
@@ -253,12 +260,12 @@ export default function RoiModal({ camera, onClose, onSave }) {
               <canvas
                 ref={canvasRef}
                 className="roi-canvas"
-                onMouseDown={handlePointerDown}
-                onMouseMove={handlePointerMove}
-                onMouseUp={handlePointerUp}
-                onMouseLeave={() => {
-                  if (isDrawing) {
-                    handlePointerUp();
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerLeave={(event) => {
+                  if (isDrawingRef.current) {
+                    handlePointerUp(event);
                   }
                 }}
               />

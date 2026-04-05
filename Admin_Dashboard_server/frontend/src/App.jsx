@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { createBunk, createCamera, fetchBunks, fetchCameras, saveRoi } from "./api";
 import BunkCard from "./components/BunkCard.jsx";
+import MapPickerModal from "./components/MapPickerModal.jsx";
 import RoiModal from "./components/RoiModal.jsx";
 
 const initialBunkForm = {
   name: "",
-  address: ""
+  address: "",
+  latitude: "",
+  longitude: ""
 };
 
 export default function App() {
@@ -16,6 +19,7 @@ export default function App() {
   const [banner, setBanner] = useState(null);
   const [activeCamera, setActiveCamera] = useState(null);
   const [busyBunkIds, setBusyBunkIds] = useState([]);
+  const [isMapPickerOpen, setIsMapPickerOpen] = useState(false);
 
   useEffect(() => {
     loadDashboard();
@@ -133,6 +137,37 @@ export default function App() {
                 required
               />
             </div>
+            <div className="field-group">
+              <label>Coordinates</label>
+              <div className="coordinate-picker-row">
+                <input
+                  value={bunkForm.latitude}
+                  onChange={(event) =>
+                    setBunkForm((current) => ({ ...current, latitude: event.target.value }))
+                  }
+                  placeholder="Latitude"
+                  inputMode="decimal"
+                />
+                <input
+                  value={bunkForm.longitude}
+                  onChange={(event) =>
+                    setBunkForm((current) => ({ ...current, longitude: event.target.value }))
+                  }
+                  placeholder="Longitude"
+                  inputMode="decimal"
+                />
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => setIsMapPickerOpen(true)}
+                >
+                  Choose From Map
+                </button>
+              </div>
+              <p className="helper-text">
+                Pick a point on the map or enter latitude and longitude manually.
+              </p>
+            </div>
             <div className="inline-actions">
               <button className="primary-button" type="submit">
                 Create Bunk
@@ -185,6 +220,21 @@ export default function App() {
         camera={activeCamera}
         onClose={() => setActiveCamera(null)}
         onSave={handleSaveRoi}
+      />
+
+      <MapPickerModal
+        isOpen={isMapPickerOpen}
+        initialLatitude={bunkForm.latitude}
+        initialLongitude={bunkForm.longitude}
+        onClose={() => setIsMapPickerOpen(false)}
+        onSelect={({ latitude, longitude }) => {
+          setBunkForm((current) => ({
+            ...current,
+            latitude: latitude.toFixed(6),
+            longitude: longitude.toFixed(6)
+          }));
+          setIsMapPickerOpen(false);
+        }}
       />
     </div>
   );

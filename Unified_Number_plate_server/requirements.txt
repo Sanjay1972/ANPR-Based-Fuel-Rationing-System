@@ -4,3 +4,4 @@ numpy==1.26.4
 psycopg2-binary
 paddleocr==2.7.0.3
 paddlepaddle==2.6.2
+redis

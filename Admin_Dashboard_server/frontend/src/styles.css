@@ -30,6 +30,10 @@ input {
   font: inherit;
 }
 
+.leaflet-container {
+  font: inherit;
+}
+
 .app-shell {
   position: relative;
   min-height: 100vh;
@@ -132,6 +136,14 @@ h3 {
   transform: translateY(-1px);
 }
 
+.primary-button:disabled,
+.secondary-button:disabled,
+.ghost-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .primary-button {
   background: linear-gradient(135deg, var(--accent), #ffa53f);
   color: #23140f;
@@ -184,6 +196,20 @@ h3 {
 .field-group input:focus {
   border-color: rgba(255, 179, 71, 0.8);
   box-shadow: 0 0 0 3px rgba(255, 179, 71, 0.14);
+}
+
+.coordinate-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.helper-text,
+.coordinate-text {
+  margin: 8px 0 0;
+  color: #e7cdb8;
+  font-size: 0.92rem;
 }
 
 .inline-actions {
@@ -343,6 +369,10 @@ h3 {
   padding: 24px;
 }
 
+.map-modal-card {
+  width: min(960px, 100%);
+}
+
 .modal-header,
 .modal-footer {
   display: flex;
@@ -362,6 +392,8 @@ h3 {
 }
 
 .canvas-shell {
+  display: flex;
+  justify-content: center;
   border-radius: 20px;
   overflow: auto;
   background: #120a08;
@@ -370,14 +402,61 @@ h3 {
 
 .roi-canvas {
   display: block;
-  width: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
   max-height: 65vh;
-  object-fit: contain;
   cursor: crosshair;
+  touch-action: none;
+  user-select: none;
 }
 
 .modal-footer {
   margin-top: 18px;
+}
+
+.map-picker-header-copy {
+  margin: 10px 0 0;
+  color: var(--muted);
+}
+
+.map-picker-layout {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.map-picker-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.map-picker-toolbar .field-group {
+  min-width: 180px;
+  flex: 1;
+}
+
+.map-shell {
+  min-height: 420px;
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.map-surface {
+  min-height: 420px;
+}
+
+.map-fallback {
+  min-height: 420px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 @media (max-width: 860px) {
@@ -399,5 +478,9 @@ h3 {
 
   .camera-actions {
     justify-content: flex-start;
+  }
+
+  .coordinate-picker-row {
+    grid-template-columns: 1fr;
   }
 }

@@ -28,7 +28,7 @@ app.get("/api/health", async (_req, res, next) => {
 app.get("/api/bunks", async (_req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, address FROM bunks ORDER BY id ASC`
+      `SELECT id, name, address, latitude, longitude FROM bunks ORDER BY id ASC`
     );
     res.json(result.rows);
   } catch (error) {
@@ -37,18 +37,45 @@ app.get("/api/bunks", async (_req, res, next) => {
 });
 
 app.post("/api/bunks", async (req, res, next) => {
-  const { name, address } = req.body ?? {};
+  const { name, address, latitude, longitude } = req.body ?? {};
 
   if (!name?.trim() || !address?.trim()) {
     return res.status(400).json({ error: "Name and address required" });
   }
 
+  const hasLatitude = latitude !== undefined && latitude !== null && latitude !== "";
+  const hasLongitude = longitude !== undefined && longitude !== null && longitude !== "";
+
+  if (hasLatitude !== hasLongitude) {
+    return res.status(400).json({ error: "Both latitude and longitude are required together" });
+  }
+
+  let parsedLatitude = null;
+  let parsedLongitude = null;
+
+  if (hasLatitude && hasLongitude) {
+    parsedLatitude = Number(latitude);
+    parsedLongitude = Number(longitude);
+
+    const isValidCoordinate =
+      Number.isFinite(parsedLatitude) &&
+      Number.isFinite(parsedLongitude) &&
+      parsedLatitude >= -90 &&
+      parsedLatitude <= 90 &&
+      parsedLongitude >= -180 &&
+      parsedLongitude <= 180;
+
+    if (!isValidCoordinate) {
+      return res.status(400).json({ error: "Invalid latitude or longitude" });
+    }
+  }
+
   try {
     const result = await pool.query(
-      `INSERT INTO bunks (name, address)
-       VALUES ($1, $2)
-       RETURNING id, name, address`,
-      [name.trim(), address.trim()]
+      `INSERT INTO bunks (name, address, latitude, longitude)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, address, latitude, longitude`,
+      [name.trim(), address.trim(), parsedLatitude, parsedLongitude]
     );
 
     res.status(201).json(result.rows[0]);
