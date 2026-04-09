@@ -75,9 +75,9 @@ export APPLICATION_SERVER_URL=http://127.0.0.1:4100
 7. Start another number plate server if needed
 ```bash
 cd "/e/Petrol Bunk Congestion Management System/Unified_Number_plate_server"
-export ANPR_SERVER_ID=server-2
-export NUMBER_PLATE_SERVER_LATITUDE=12.990000
-export NUMBER_PLATE_SERVER_LONGITUDE=80.260000
+export ANPR_SERVER_ID=server-3
+export NUMBER_PLATE_SERVER_LATITUDE=15.990000
+export NUMBER_PLATE_SERVER_LONGITUDE=85.260000
 export NUMBER_PLATE_SERVER_CONNECTION_LIMIT=3
 export APPLICATION_SERVER_URL=http://127.0.0.1:4100
 ./anpr_env/Scripts/python.exe main.py

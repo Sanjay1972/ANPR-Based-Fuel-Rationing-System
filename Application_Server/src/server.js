@@ -472,20 +472,23 @@ async function handleRequest(req, res) {
     }
 
     const recentPlateKey = `${RECENT_PLATE_KEY_PREFIX}${plate}`;
-    const recentDetection = await redis.get(recentPlateKey);
 
-    if (recentDetection) {
-      const cachedDetection = JSON.parse(recentDetection);
-      res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
-      res.end(
-        JSON.stringify({
-          ok: true,
-          ignored: true,
-          reason: "seen_within_last_15_minutes",
-          last_detection_at: cachedDetection.detected_at
-        })
-      );
-      return;
+    if (DETECTION_DEDUP_MINUTES > 0) {
+      const recentDetection = await redis.get(recentPlateKey);
+
+      if (recentDetection) {
+        const cachedDetection = JSON.parse(recentDetection);
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeaders });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            ignored: true,
+            reason: "seen_within_last_15_minutes",
+            last_detection_at: cachedDetection.detected_at
+          })
+        );
+        return;
+      }
     }
 
     const insert = await pool.query(
@@ -509,15 +512,17 @@ async function handleRequest(req, res) {
 
     if (countToday === 2) {
       await sendMail({
-        subject: `Repeat Vehicle Alert: ${plate}`,
+        subject: `Advisory Notice: Repeated Vehicle Detection (${plate})`,
         text:
-          `Vehicle ${plate} has been detected more than once today across the monitored petrol bunk network.\n\n` +
-          `This is an automated alert for review under the fuel rationing policy.\n\n` +
-          `System: ANPR Fuel Rationing System`,
+          `This is to inform you that vehicle ${plate} has been detected multiple times today across monitored petrol bunks.\n\n` +
+          `As per the fuel rationing and monitoring workflow, this repeat detection has been recorded for administrative review.\n\n` +
+          `No immediate action is required at this stage. Further action, if any, will depend on subsequent detections and review.\n\n` +
+          `Regards,\nANPR Fuel Rationing Monitoring System`,
         html:
-          `<p>Vehicle <strong>${plate}</strong> has been detected more than once today across the monitored petrol bunk network.</p>` +
-          `<p>This is an automated alert for review under the fuel rationing policy.</p>` +
-          `<p><strong>System:</strong> ANPR Fuel Rationing System</p>`
+          `<p>This is to inform you that vehicle <strong>${plate}</strong> has been detected multiple times today across monitored petrol bunks.</p>` +
+          `<p>As per the fuel rationing and monitoring workflow, this repeat detection has been recorded for administrative review.</p>` +
+          `<p>No immediate action is required at this stage. Further action, if any, will depend on subsequent detections and review.</p>` +
+          `<p>Regards,<br><strong>ANPR Fuel Rationing Monitoring System</strong></p>`
       });
       emailSent = true;
     }
@@ -534,15 +539,17 @@ async function handleRequest(req, res) {
       reviewFineCreated = true;
     }
 
-    await redis.setEx(
-      recentPlateKey,
-      DETECTION_DEDUP_MINUTES * 60,
-      JSON.stringify({
-        plate,
-        camera_id: cameraId,
-        detected_at: insert.rows[0].detected_at
-      })
-    );
+    if (DETECTION_DEDUP_MINUTES > 0) {
+      await redis.setEx(
+        recentPlateKey,
+        DETECTION_DEDUP_MINUTES * 60,
+        JSON.stringify({
+          plate,
+          camera_id: cameraId,
+          detected_at: insert.rows[0].detected_at
+        })
+      );
+    }
 
     res.writeHead(201, { "Content-Type": "application/json", ...corsHeaders });
     res.end(
@@ -673,15 +680,15 @@ async function handleRequest(req, res) {
 
     if (action === "approve") {
       await sendMail({
-        subject: `Fine Review Approved: ${reviewFine.rows[0].plate}`,
+        subject: `Penalty Review Decision Issued for Vehicle ${reviewFine.rows[0].plate}`,
         text:
-          `A fine review has been approved for vehicle ${reviewFine.rows[0].plate} after repeated detections in a single day.\n\n` +
-          `Please proceed with the required follow-up action.\n\n` +
-          `System: ANPR Fuel Rationing System`,
+          `This is to notify that the review for vehicle ${reviewFine.rows[0].plate} has been completed and a penalty action has been approved based on repeated detections within the same day.\n\n` +
+          `The case has been marked for further administrative follow-up in the system.\n\n` +
+          `Regards,\nANPR Fuel Rationing Monitoring System`,
         html:
-          `<p>A fine review has been approved for vehicle <strong>${reviewFine.rows[0].plate}</strong> after repeated detections in a single day.</p>` +
-          `<p>Please proceed with the required follow-up action.</p>` +
-          `<p><strong>System:</strong> ANPR Fuel Rationing System</p>`
+          `<p>This is to notify that the review for vehicle <strong>${reviewFine.rows[0].plate}</strong> has been completed and a penalty action has been approved based on repeated detections within the same day.</p>` +
+          `<p>The case has been marked for further administrative follow-up in the system.</p>` +
+          `<p>Regards,<br><strong>ANPR Fuel Rationing Monitoring System</strong></p>`
       });
 
       await pool.query(

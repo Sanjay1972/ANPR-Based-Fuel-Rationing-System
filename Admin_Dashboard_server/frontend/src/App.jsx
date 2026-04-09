@@ -170,9 +170,14 @@ export default function App() {
               video frames in one place.
             </p>
           </div>
-          <button className="primary-button" onClick={() => setIsAddingBunk((value) => !value)}>
-            + Add Bunk
-          </button>
+          {activeView === "operations" && (
+            <button
+              className="primary-button"
+              onClick={() => setIsAddingBunk((value) => !value)}
+            >
+              + Add Bunk
+            </button>
+          )}
         </section>
 
         <section className="panel nav-panel">
